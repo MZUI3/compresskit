@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 import compresskit as ck
-from conftest import SharedConvOut, warm_bn
+from conftest import SharedConvOut, clone, warm_bn
 
 
 def silence_dead_channels(conv, bn=None):
@@ -64,6 +64,39 @@ def test_shrink_mlp_with_flatten_block(mlp_batches):
     assert ck.remove_pruned_channels(net, img) == {"0": 3}
     assert net[0].weight.shape == (3, 3, 3, 3) and net[4].weight.shape == (5, 12)
     assert torch.allclose(net(img), y0, atol=1e-6)
+
+
+def test_bias_compensation_is_exact_for_linear_and_unpadded_conv(mlp_batches, batches):
+    # the zeroed rows still push their bias through the ReLU into the next layer; folding that constant into
+    # the consumer's bias keeps the output identical
+    x = mlp_batches[0][0]
+    mlp = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 10)).eval()
+    ck.prune_filters(mlp, 0.5, scope="layer").detach()
+    y0 = mlp(x)
+    assert ck.remove_pruned_channels(mlp, x) == {"0": 16}
+    assert torch.allclose(mlp(x), y0, atol=1e-5)
+
+    img = batches[0][0]
+    net = nn.Sequential(nn.Conv2d(3, 8, 3, padding=1), nn.BatchNorm2d(8), nn.ReLU(), nn.Conv2d(8, 16, 3),
+                        nn.ReLU(), nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(16, 5))
+    warm_bn(net, batches)
+    ck.prune_filters(net, 0.5, scope="layer").detach()
+    y0 = net(img)
+    assert ck.remove_pruned_channels(net, img) == {"0": 4, "3": 8}
+    assert net[3].weight.shape == (8, 4, 3, 3) and net[7].weight.shape == (5, 8)
+    assert torch.allclose(net(img), y0, atol=1e-5)
+
+
+def test_bias_compensation_helps_with_padding(cnn, batches):
+    x = batches[0][0]
+    ck.prune_filters(cnn, 0.5, scope="layer").detach()
+    y0 = cnn(x)
+    plain, compensated = clone(cnn), clone(cnn)
+    ck.remove_pruned_channels(plain, x, compensate_bias=False)
+    ck.remove_pruned_channels(compensated, x)
+    err_plain = (plain(x) - y0).norm()
+    err_comp = (compensated(x) - y0).norm()
+    assert err_comp < err_plain  # only the zero-padded border of conv2 is left uncorrected
 
 
 def test_shrink_quantized_model(cnn, batches):

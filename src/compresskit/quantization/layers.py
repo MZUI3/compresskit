@@ -246,11 +246,18 @@ def export_mode(model: nn.Module):
 
 def export_onnx(model: nn.Module, example, path: str, *, opset: int = 17, input_names=("input",),
                 output_names=("output",), **kwargs) -> str:
-    """Export a (fake-)quantized model to ONNX with Q/DQ nodes (needs the ``onnx`` package). Extra keyword
-    arguments go to ``torch.onnx.export``. Runs on a CPU copy of the model."""
+    """Export a (fake-)quantized model to ONNX with QuantizeLinear/DequantizeLinear nodes (needs ``onnx``).
+
+    Uses the TorchScript exporter (``dynamo=False``), where 8-bit fake quantizers map to Q/DQ; ONNX Runtime then
+    reproduces the fake-quantized model to about 1e-2. Pass ``dynamo=True`` for the newer exporter (needs
+    ``onnxscript``). Extra keyword arguments go to ``torch.onnx.export``. Runs on a CPU copy of the model."""
+    import inspect
+
     m = copy.deepcopy(model).cpu().eval()
     x = batch_input(example)
     x = x.cpu() if isinstance(x, torch.Tensor) else x
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        kwargs.setdefault("dynamo", False)
     with export_mode(m), torch.no_grad():
         torch.onnx.export(m, (x,), path, opset_version=opset, input_names=list(input_names),
                           output_names=list(output_names), **kwargs)

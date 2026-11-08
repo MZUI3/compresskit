@@ -86,7 +86,7 @@ ck.finetune(model, train_loader, epochs=3, masks=masks)  # 0을 고정한 채 �
 removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}: 이제 모델이 실제로 작아짐
 ```
 
-`remove_pruned_channels`는 forward 한 번을 추적해서 안전한 곳만 지웁니다. 만든 쪽의 출력이 채널을 보존하는 모듈(BatchNorm, activation, pooling, dropout, Flatten)만 거쳐 정확히 하나의 Conv(`groups=1`) 또는 Linear로 들어갈 때만 삭제합니다. 출력이 공유되거나(residual 덧셈, concat) grouped conv가 소비하는 경우는 0인 채로 그대로 둡니다. classifier의 출력은 절대 지우지 않습니다. 파라미터 shape이 바뀌므로 학습이 끝난 뒤에 쓰고(이전 optimizer와 `MaskSet`은 무효가 됩니다), 지워진 채널의 bias / BatchNorm shift도 함께 사라지므로 출력이 조금 달라지는 것은 감안해야 합니다.
+`remove_pruned_channels`는 forward 한 번을 추적해서 안전한 곳만 지웁니다. 만든 쪽의 출력이 채널을 보존하는 모듈(BatchNorm, activation, pooling, dropout, Flatten)만 거쳐 정확히 하나의 Conv(`groups=1`) 또는 Linear로 들어갈 때만 삭제합니다. 출력이 공유되거나(residual 덧셈, concat) grouped conv가 소비하는 경우는 0인 채로 그대로 둡니다. classifier의 출력은 절대 지우지 않습니다. 파라미터 shape이 바뀌므로 학습이 끝난 뒤에 쓰세요(이전 optimizer와 `MaskSet`은 무효가 됩니다). 0이 된 채널도 bias / BatchNorm shift가 activation을 거친 상수를 다음 레이어로 계속 흘려보내는데, 이 상수를 `example`에서 측정해 소비 레이어의 bias에 접어 넣으므로 Linear 소비자와 padding 없는 conv에서는 출력이 그대로이고, zero padding이 있는 conv에서는 테두리 위치만 달라집니다(`compensate_bias=False`로 끌 수 있습니다).
 
 ## Quantization
 
@@ -97,7 +97,7 @@ removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}
 | `quantize_weight_only(model, bits=8 \| 4 \| 2, group_size=None)` | 정수 가중치를 packed `uint8` 버퍼에 저장하고 `forward`에서 dequantize | 실제 저장 용량 감소, 모든 장치 |
 | `quantize_dynamic_int8(model)` | PyTorch dynamic int8 quantization (Linear / LSTM / GRU) | 실제 int8 커널, CPU |
 
-*simulated*는 가중치와 activation을 정수 격자로 반올림하되 float으로 저장·연산한다는 뜻입니다. int8(또는 int4) 배포에서 볼 정확도를 어떤 장치에서든 그대로 얻을 수 있고, fake quantizer는 ONNX로 내보낼 때 QuantizeLinear/DequantizeLinear 노드가 됩니다(`export_onnx`). 실제 정수 커널은 배포하는 런타임(ONNX Runtime, TensorRT 등)의 몫입니다.
+*simulated*는 가중치와 activation을 정수 격자로 반올림하되 float으로 저장·연산한다는 뜻입니다. int8(또는 int4) 배포에서 볼 정확도를 어떤 장치에서든 그대로 얻을 수 있습니다. `export_onnx`는 8-bit fake quantizer를 QuantizeLinear/DequantizeLinear 노드로 내보내고(TorchScript exporter), ONNX Runtime이 fake-quantized 모델을 1e-2 안팎으로 재현합니다. 실제 정수 커널은 배포하는 런타임(ONNX Runtime, TensorRT 등)의 몫입니다.
 
 ```python
 # PTQ: 학습 데이터 배치 몇 개면 충분

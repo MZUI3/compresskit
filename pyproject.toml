@@ -21,7 +21,7 @@ dependencies = ["torch>=2.0", "numpy"]
 [project.optional-dependencies]
 lightning = ["lightning>=2.0"]
 onnx = ["onnx>=1.16", "onnxruntime>=1.18"]
-dev = ["pytest", "lightning>=2.0"]
+dev = ["pytest", "lightning>=2.0", "onnx>=1.16", "onnxruntime>=1.18"]
 
 [project.urls]
 Homepage = "https://github.com/MZUI3/compresskit"

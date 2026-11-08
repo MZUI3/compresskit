@@ -86,7 +86,7 @@ ck.finetune(model, train_loader, epochs=3, masks=masks)  # recover accuracy with
 removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}: the model is now physically smaller
 ```
 
-`remove_pruned_channels` traces one forward pass and deletes a zeroed channel only where that is safe: the producer's output must flow through channel-preserving modules (BatchNorm, activations, pooling, dropout, Flatten) into exactly one Conv (`groups=1`) or Linear. Outputs that are shared (residual additions, concatenations) or consumed by grouped convolutions stay as they are, still zeroed. The classifier's outputs are never removed. Do it after training (parameter shapes change, so optimizers and old `MaskSet`s become stale), and expect a small output change because the removed channels' bias / BatchNorm shift goes with them.
+`remove_pruned_channels` traces one forward pass and deletes a zeroed channel only where that is safe: the producer's output must flow through channel-preserving modules (BatchNorm, activations, pooling, dropout, Flatten) into exactly one Conv (`groups=1`) or Linear. Outputs that are shared (residual additions, concatenations) or consumed by grouped convolutions stay as they are, still zeroed. The classifier's outputs are never removed. Do it after training (parameter shapes change, so optimizers and old `MaskSet`s become stale). A zeroed channel still feeds a constant forward (its bias / BatchNorm shift after the activation); that constant is measured on `example` and folded into the consumer's bias, so the output is unchanged for Linear consumers and unpadded convolutions and differs only at the zero-padded border otherwise (`compensate_bias=False` turns this off).
 
 ## Quantization
 
@@ -97,7 +97,7 @@ removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}
 | `quantize_weight_only(model, bits=8 \| 4 \| 2, group_size=None)` | Integer weights in packed `uint8` buffers, dequantized in `forward` | real storage, any device |
 | `quantize_dynamic_int8(model)` | PyTorch dynamic int8 quantization of Linear / LSTM / GRU | real int8 kernels, CPU |
 
-*Simulated* means the weights and activations are rounded to the integer grid but stored and computed in float: you get exactly the accuracy an int8 (or int4) deployment would see, on any device, and the fake quantizers export to ONNX as QuantizeLinear/DequantizeLinear nodes (`export_onnx`). Real integer kernels are the job of the runtime you deploy with (ONNX Runtime, TensorRT, ...).
+*Simulated* means the weights and activations are rounded to the integer grid but stored and computed in float: you get exactly the accuracy an int8 (or int4) deployment would see, on any device. `export_onnx` turns the 8-bit fake quantizers into QuantizeLinear/DequantizeLinear nodes (TorchScript exporter; ONNX Runtime reproduces the fake-quantized model to about 1e-2). Real integer kernels are the job of the runtime you deploy with (ONNX Runtime, TensorRT, ...).
 
 ```python
 # PTQ: a few batches of training data are enough
