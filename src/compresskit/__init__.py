@@ -23,6 +23,7 @@ from .pruning import (  # noqa: F401
     prune_obd,
     prune_random,
     prune_snip,
+    remove_pruned_channels,
     sparsity_report,
 )
 from .quantization import (  # noqa: F401
@@ -69,5 +70,6 @@ from .utils import (  # noqa: F401
     summary,
     weight_sparsity,
 )
+from .train import evaluate, finetune  # noqa: F401
 from .registry import available, describe, get, register  # noqa: F401
 from .pipeline import CompressResult, compress  # noqa: F401

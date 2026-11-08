@@ -27,7 +27,13 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(CPU든 CUDA든)에서 그대로 동작합니다. 유일한 예외는 PyTorch의 CPU int8 커널을 쓰는 `quantize_dynamic_int8`입니다.
+Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(CPU든 CUDA든)에서 그대로 동작합니다. 유일한 예외는 PyTorch의 CPU int8 커널을 쓰는 `quantize_dynamic_int8`입니다. Lightning 콜백을 쓰려면 `pip install lightning`이 필요합니다.
+
+쓰는 방법은 세 가지입니다. 직접 다루는 정도가 큰 순서입니다.
+
+1. **함수**: 내 모델과 내 학습 루프에 `ck.prune_magnitude`, `ck.quantize_ptq` 등을 그대로 호출.
+2. **`ck.finetune` / `ck.compress`**: 학습 루프와 기법 체인까지 맡기고 싶을 때.
+3. **Lightning 콜백**(`compresskit.lightning`): PyTorch Lightning으로 학습한다면 콜백 하나 추가로 끝. 나머지는 그대로.
 
 ## Pruning
 
@@ -41,6 +47,7 @@ Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(C
 | `prune_nm(model, n=2, m=4)` | N:M semi-structured sparsity (2:4는 Ampere 이후 GPU의 sparse tensor core에서 가속) | Mishra et al., 2021 |
 | `prune_by_scores(model, scores, sparsity)` | 직접 만든 중요도 점수 `{파라미터 이름: tensor}`로 pruning | |
 | `GradualPruner(model, final_sparsity, total_steps)` | 학습 중 cubic schedule로 sparsity를 점진적으로 올림 | Zhu & Gupta, 2017 |
+| `remove_pruned_channels(model, example)` | `prune_filters`가 0으로 만든 채널을 실제로 삭제: 파라미터, MACs, latency 모두 감소 | |
 
 모든 함수는 **in place**로 pruning하고 `MaskSet`을 돌려줍니다. Conv / Linear / MultiheadAttention 가중치마다 boolean mask 하나씩입니다.
 
@@ -71,7 +78,15 @@ for x, y in loader:
 masks = pruner.finish()
 ```
 
-mask 방식이라 텐서 shape은 그대로입니다. unstructured / filter pruning은 저장 용량(`estimated_bytes`)은 줄이지만 dense 하드웨어에서 빨라지지는 않습니다. `prune_filters`로 0이 된 채널을 물리적으로 제거하려면 mask된 모델을 Torch-Pruning 같은 dependency-graph 도구에 넘기면 됩니다.
+mask는 텐서 shape을 그대로 두므로 unstructured pruning은 저장 용량(`estimated_bytes`)만 줄이고 latency는 그대로입니다. filter pruning은 끝까지 갈 수 있습니다.
+
+```python
+masks = ck.prune_filters(model, 0.5)                   # 레이어마다 출력 채널 절반을 0으로
+ck.finetune(model, train_loader, epochs=3, masks=masks)  # 0을 고정한 채 정확도 회복
+removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}: 이제 모델이 실제로 작아짐
+```
+
+`remove_pruned_channels`는 forward 한 번을 추적해서 안전한 곳만 지웁니다. 만든 쪽의 출력이 채널을 보존하는 모듈(BatchNorm, activation, pooling, dropout, Flatten)만 거쳐 정확히 하나의 Conv(`groups=1`) 또는 Linear로 들어갈 때만 삭제합니다. 출력이 공유되거나(residual 덧셈, concat) grouped conv가 소비하는 경우는 0인 채로 그대로 둡니다. classifier의 출력은 절대 지우지 않습니다. 파라미터 shape이 바뀌므로 학습이 끝난 뒤에 쓰고(이전 optimizer와 `MaskSet`은 무효가 됩니다), 지워진 채널의 bias / BatchNorm shift도 함께 사라지므로 출력이 조금 달라지는 것은 감안해야 합니다.
 
 ## Quantization
 
@@ -106,6 +121,47 @@ q = ck.quantize_weight_only(model, bits=4, group_size=128)
 
 더 낮은 수준의 부품도 그대로 쓸 수 있습니다: `fold_bn`, `attach_quantizers`, `init_weight_quantizers`, `calibrate`, `set_mode`, `quantizers`, `export_mode`, 그리고 `Quantizer`, `LSQQuantizer`, `Observer` 클래스. 양자화된 레이어는 원래 파라미터와 state_dict 키를 그대로 유지하고(`fc.weight`는 그대로 `fc.weight`) `fc.wq.*` / `fc.aq.*` 버퍼가 추가됩니다. 저장한 양자화 모델을 다시 불러오려면 float 모델을 만들고 같은 설정으로 `fold_bn`, `attach_quantizers`를 호출한 뒤 `load_state_dict` 하면 됩니다.
 
+## 학습: fine-tune, 점진적 pruning, QAT
+
+학습 루프가 있다면 각 부품은 한 줄씩입니다. 루프 전에 `masks.attach()`, optimizer step마다 `pruner.step()`, QAT 앞뒤로 `prepare_qat` / `finalize_qat`. 루프가 없다면 `finetune`이 합리적인 기본값(momentum SGD 또는 Adam/AdamW, cosine schedule, validation, mask 처리, QAT 파라미터 그룹)을 갖춘 작은 루프이고, `evaluate`는 loss와 accuracy를 돌려줍니다.
+
+```python
+masks = ck.prune_magnitude(model, 0.8)
+ck.finetune(model, train_loader, epochs=3, lr=1e-3, masks=masks, val_loader=val_loader)
+
+pruner = ck.GradualPruner(model, final_sparsity=0.9, total_steps=5 * len(train_loader))
+ck.finetune(model, train_loader, epochs=5, pruner=pruner)
+
+q = ck.prepare_qat(model, method="lsq", w_bits=4, a_bits=4)
+ck.finetune(q, train_loader, epochs=2, optimizer="adam", lr=3e-4, quantizer_lr=1e-4)
+ck.finalize_qat(q)
+
+ck.evaluate(q, val_loader)       # {'loss': ..., 'accuracy': ...}
+```
+
+배치는 `(inputs, targets)`이고 loss는 cross-entropy가 기본이며, `loss_fn(model, batch)`을 넘기면 바뀝니다. `finetune`은 파이프라인 단계로도 쓸 수 있고 `compress`가 mask를 알아서 넘겨줍니다: `compress(model, [("magnitude", {"sparsity": 0.8}), ("finetune", {"train_loader": loader, "epochs": 2}), ("ptq", {"calib_batches": calib})])`.
+
+## PyTorch Lightning
+
+`LightningModule`은 아무것도 바꾸지 않습니다. 압축은 콜백입니다.
+
+```python
+import lightning as L
+import compresskit.lightning as ckl
+
+trainer = L.Trainer(max_epochs=20, callbacks=[
+    ckl.GradualPruning(final_sparsity=0.8, end=0.7, module_attr="model"),  # 학습의 앞 70% 동안 0 -> 80%
+    ckl.QAT(w_bits=8, a_bits=8, method="lsq", module_attr="model"),         # fake quantizer 삽입, fit 끝나면 finalize
+])
+trainer.fit(lit_module, datamodule)
+```
+
+- `Pruning(prune, amount, at_epoch=0)`: `"magnitude"`, `"random"`, `"filters"`, `"nm"` 또는 `model -> MaskSet` callable로 한 번 pruning하고 mask를 고정. `Pruning(masks=...)`는 이미 있는 mask를 붙임.
+- `GradualPruning(final_sparsity, ...)`: `trainer.estimated_stepping_batches` 위에서 cubic schedule.
+- `QAT(w_bits, a_bits, method)`: `setup`에서 quantizer 삽입, train dataloader에 닿으면 그걸로 calibration(아니면 첫 배치), 학습되는 step size는 optimizer에 자동 추가, fit이 끝나면 `finalize_qat`.
+
+`module_attr`는 LightningModule 안의 네트워크 이름입니다(`self.model` -> `"model"`). `None`이면 모듈 전체를 압축합니다. sparsity는 epoch마다 log되고 mask는 `callback.masks`로 꺼낼 수 있습니다. `lightning`과 예전 `pytorch_lightning` 패키지 모두에서 동작합니다.
+
 ## 측정
 
 ```python
@@ -138,13 +194,15 @@ print(ck.describe())  # 기법별 한 줄 설명
 
 ```
 src/compresskit/
-  pruning/        masks.py (MaskSet), unstructured.py, structured.py, nm.py, gradual.py
+  pruning/        masks.py (MaskSet), unstructured.py, structured.py, nm.py, gradual.py, shrink.py (remove_pruned_channels)
   quantization/   observers.py, quantizer.py, layers.py, fold.py, ptq.py, qat.py, weight_only.py, torch_backend.py
   utils/          stats.py (파라미터, MACs, 바이트, summary, compare), benchmark.py (latency)
+  train.py        finetune(), evaluate()
+  lightning.py    Pruning, GradualPruning, QAT 콜백 (lightning 필요)
   registry.py     @register / get / available
   pipeline.py     compress()
-tests/            pytest 스위트 (작은 CPU 모델, 수 초)
-examples/         quickstart.py, train_with_pruning.py, qat_lsq.py
+tests/            pytest 스위트 (작은 CPU 모델, 수 초; lightning이 없으면 Lightning 테스트는 skip)
+examples/         quickstart.py, train_with_pruning.py, qat_lsq.py, lightning_callbacks.py
 ```
 
 ## 참고

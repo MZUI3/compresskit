@@ -77,6 +77,7 @@ class GradualPruner:
 
     def finish(self) -> MaskSet:
         self._prune_to(self.final)
+        self.masks.apply()
         return self.masks
 
     def __repr__(self) -> str:

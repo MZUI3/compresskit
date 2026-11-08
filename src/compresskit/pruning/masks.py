@@ -154,7 +154,12 @@ class MaskSet:
         self.apply()
 
     def detach(self) -> "MaskSet":
-        """Remove the training hooks. The weights stay as they are (zeros included)."""
+        """Re-apply the masks once more and remove the training hooks, so the pruned weights are left exactly
+        zero (momentum from before the masks were attached can nudge them between the last optimizer step
+        and the next forward pass). Masks that no longer fit the weights (after ``remove_pruned_channels``)
+        are not applied."""
+        if all(tuple(self.masks[n].shape) == tuple(w.shape) for n, w in self.targets.items()):
+            self.apply()
         for h in self._handles:
             h.remove()
         self._handles = []

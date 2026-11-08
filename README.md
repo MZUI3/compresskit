@@ -27,7 +27,13 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.10+ and PyTorch 2.0+. Everything runs on whatever device the model is on (CPU or CUDA); the one exception is `quantize_dynamic_int8`, which uses PyTorch's CPU int8 kernels.
+Python 3.10+ and PyTorch 2.0+. Everything runs on whatever device the model is on (CPU or CUDA); the one exception is `quantize_dynamic_int8`, which uses PyTorch's CPU int8 kernels. The Lightning callbacks need `pip install lightning`.
+
+Three ways to use it, from most to least hands-on:
+
+1. **Functions** on your own model and training loop: `ck.prune_magnitude`, `ck.quantize_ptq`, ...
+2. **`ck.finetune` / `ck.compress`** when you want the training loop and the method chain handled for you.
+3. **Lightning callbacks** (`compresskit.lightning`) when you train with PyTorch Lightning: add a callback, nothing else changes.
 
 ## Pruning
 
@@ -41,6 +47,7 @@ Python 3.10+ and PyTorch 2.0+. Everything runs on whatever device the model is o
 | `prune_nm(model, n=2, m=4)` | N:M semi-structured sparsity (2:4 runs on Ampere+ sparse tensor cores) | Mishra et al., 2021 |
 | `prune_by_scores(model, scores, sparsity)` | Your own importance scores `{param name: tensor}` | |
 | `GradualPruner(model, final_sparsity, total_steps)` | Gradual magnitude pruning on the cubic schedule while you train | Zhu & Gupta, 2017 |
+| `remove_pruned_channels(model, example)` | Physically delete the channels `prune_filters` zeroed: fewer parameters, fewer MACs, lower latency | |
 
 Every function prunes **in place** and returns a `MaskSet`: one boolean mask per Conv / Linear / MultiheadAttention weight.
 
@@ -71,7 +78,15 @@ for x, y in loader:
 masks = pruner.finish()
 ```
 
-Masked weights keep their shape, so unstructured and filter pruning make the model smaller to store (`estimated_bytes`) but not faster on dense hardware. To physically remove the channels that `prune_filters` zeroed, hand the masked model to a dependency-graph tool such as Torch-Pruning.
+Masks keep tensor shapes, so unstructured pruning shrinks storage (`estimated_bytes`) but not latency. Filter pruning can go all the way:
+
+```python
+masks = ck.prune_filters(model, 0.5)                   # zero half of the output channels of every layer
+ck.finetune(model, train_loader, epochs=3, masks=masks)  # recover accuracy with the zeros fixed
+removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}: the model is now physically smaller
+```
+
+`remove_pruned_channels` traces one forward pass and deletes a zeroed channel only where that is safe: the producer's output must flow through channel-preserving modules (BatchNorm, activations, pooling, dropout, Flatten) into exactly one Conv (`groups=1`) or Linear. Outputs that are shared (residual additions, concatenations) or consumed by grouped convolutions stay as they are, still zeroed. The classifier's outputs are never removed. Do it after training (parameter shapes change, so optimizers and old `MaskSet`s become stale), and expect a small output change because the removed channels' bias / BatchNorm shift goes with them.
 
 ## Quantization
 
@@ -106,6 +121,47 @@ q = ck.quantize_weight_only(model, bits=4, group_size=128)
 
 Lower-level pieces are available too: `fold_bn`, `attach_quantizers`, `init_weight_quantizers`, `calibrate`, `set_mode`, `quantizers`, `export_mode`, and the `Quantizer`, `LSQQuantizer`, `Observer` classes. Quantized layers keep the original parameters and state_dict keys (`fc.weight` stays `fc.weight`) and add `fc.wq.*` / `fc.aq.*` buffers; to reload a saved quantized model, rebuild the float model, call `fold_bn` and `attach_quantizers` with the same settings, then `load_state_dict`.
 
+## Training: fine-tune, gradual pruning, QAT
+
+With your own training loop, each piece is one line: `masks.attach()` before the loop, `pruner.step()` after every optimizer step, `prepare_qat` / `finalize_qat` around QAT. Without one, `finetune` is a small loop with sensible defaults (SGD with momentum or Adam/AdamW, cosine schedule, validation, mask handling, QAT parameter groups) and `evaluate` reports loss and accuracy:
+
+```python
+masks = ck.prune_magnitude(model, 0.8)
+ck.finetune(model, train_loader, epochs=3, lr=1e-3, masks=masks, val_loader=val_loader)
+
+pruner = ck.GradualPruner(model, final_sparsity=0.9, total_steps=5 * len(train_loader))
+ck.finetune(model, train_loader, epochs=5, pruner=pruner)
+
+q = ck.prepare_qat(model, method="lsq", w_bits=4, a_bits=4)
+ck.finetune(q, train_loader, epochs=2, optimizer="adam", lr=3e-4, quantizer_lr=1e-4)
+ck.finalize_qat(q)
+
+ck.evaluate(q, val_loader)       # {'loss': ..., 'accuracy': ...}
+```
+
+Batches are `(inputs, targets)` with a cross-entropy loss unless you pass `loss_fn(model, batch)`. `finetune` is also a pipeline step, and `compress` hands it the masks: `compress(model, [("magnitude", {"sparsity": 0.8}), ("finetune", {"train_loader": loader, "epochs": 2}), ("ptq", {"calib_batches": calib})])`.
+
+## PyTorch Lightning
+
+Nothing changes in your `LightningModule`; compression is a callback:
+
+```python
+import lightning as L
+import compresskit.lightning as ckl
+
+trainer = L.Trainer(max_epochs=20, callbacks=[
+    ckl.GradualPruning(final_sparsity=0.8, end=0.7, module_attr="model"),  # 0 -> 80% over the first 70% of training
+    ckl.QAT(w_bits=8, a_bits=8, method="lsq", module_attr="model"),         # fake quantizers in, finalised when fit ends
+])
+trainer.fit(lit_module, datamodule)
+```
+
+- `Pruning(prune, amount, at_epoch=0)`: prune once with `"magnitude"`, `"random"`, `"filters"`, `"nm"` or a callable `model -> MaskSet`, then keep the masks fixed; `Pruning(masks=...)` attaches masks you already have.
+- `GradualPruning(final_sparsity, ...)`: the cubic schedule over `trainer.estimated_stepping_batches`.
+- `QAT(w_bits, a_bits, method)`: quantizers go in at `setup`, are calibrated on the train dataloader when it is reachable (else on the first batch), learned step sizes are added to the optimizer automatically, and `finalize_qat` runs when fit ends.
+
+`module_attr` names the network inside the LightningModule (`self.model` -> `"model"`); `None` compresses the whole module. Sparsity is logged every epoch, and the masks are available as `callback.masks`. Works with `lightning` and the older `pytorch_lightning` package.
+
 ## Measuring
 
 ```python
@@ -138,13 +194,15 @@ print(ck.describe())  # one line per method
 
 ```
 src/compresskit/
-  pruning/        masks.py (MaskSet), unstructured.py, structured.py, nm.py, gradual.py
+  pruning/        masks.py (MaskSet), unstructured.py, structured.py, nm.py, gradual.py, shrink.py (remove_pruned_channels)
   quantization/   observers.py, quantizer.py, layers.py, fold.py, ptq.py, qat.py, weight_only.py, torch_backend.py
   utils/          stats.py (params, MACs, bytes, summary, compare), benchmark.py (latency)
+  train.py        finetune(), evaluate()
+  lightning.py    Pruning, GradualPruning, QAT callbacks (needs lightning)
   registry.py     @register / get / available
   pipeline.py     compress()
-tests/            pytest suite (small CPU models, a few seconds)
-examples/         quickstart.py, train_with_pruning.py, qat_lsq.py
+tests/            pytest suite (small CPU models, a few seconds; the Lightning tests skip without lightning)
+examples/         quickstart.py, train_with_pruning.py, qat_lsq.py, lightning_callbacks.py
 ```
 
 ## Notes

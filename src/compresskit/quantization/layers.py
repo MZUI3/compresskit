@@ -40,6 +40,7 @@ class _Quantized:
 
     wq: nn.Module
     aq: nn.Module
+    trace_as_leaf = True  # the tracer in ``fold.py`` treats the layer as one unit despite its sub-modules
 
     @classmethod
     def from_float(cls, m: nn.Module, wq: nn.Module, aq: nn.Module):
