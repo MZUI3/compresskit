@@ -27,7 +27,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.9+ and PyTorch 2.0+. Everything runs on whatever device the model is on (CPU or CUDA); the one exception is `quantize_dynamic_int8`, which uses PyTorch's CPU int8 kernels.
+Python 3.10+ and PyTorch 2.0+. Everything runs on whatever device the model is on (CPU or CUDA); the one exception is `quantize_dynamic_int8`, which uses PyTorch's CPU int8 kernels.
 
 ## Pruning
 

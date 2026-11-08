@@ -27,7 +27,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Python 3.9+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(CPU든 CUDA든)에서 그대로 동작합니다. 유일한 예외는 PyTorch의 CPU int8 커널을 쓰는 `quantize_dynamic_int8`입니다.
+Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(CPU든 CUDA든)에서 그대로 동작합니다. 유일한 예외는 PyTorch의 CPU int8 커널을 쓰는 `quantize_dynamic_int8`입니다.
 
 ## Pruning
 
