@@ -2,7 +2,7 @@
 
 [English](README.md) | 한국어
 
-PyTorch 모델의 Pruning과 Quantization을 그냥 함수로 쓰는 라이브러리입니다. GitHub에서 `pip install` 하고, import 하고, 아무 `nn.Module`에나 호출하면 됩니다. config 파일도, 학습 하네스도, 데이터셋도 없습니다. 모든 함수는 모델(그리고 기법이 필요로 하면 calibration 배치 몇 개)을 받아 결과를 돌려줍니다.
+PyTorch 모델의 pruning과 quantization을 그냥 함수로 쓰는 라이브러리입니다. GitHub에서 `pip install` 하고, import 하고, 아무 `nn.Module`에나 호출하면 됩니다. config 파일도, 학습 하네스도, 데이터셋도 없습니다. 모든 함수는 모델(그리고 기법이 필요로 하면 calibration 배치 몇 개)을 받아 결과를 돌려줍니다.
 
 ```python
 import compresskit as ck
@@ -33,7 +33,7 @@ Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(C
 
 1. **함수**: 내 모델과 내 학습 루프에 `ck.prune_magnitude`, `ck.quantize_ptq` 등을 그대로 호출.
 2. **`ck.finetune` / `ck.compress`**: 학습 루프와 기법 체인까지 맡기고 싶을 때.
-3. **Lightning 콜백**(`compresskit.lightning`): PyTorch Lightning으로 학습한다면 콜백 하나 추가로 끝. 나머지는 그대로.
+3. **콜백**(`compresskit.lightning`, PyTorch Lightning에서 차용한 방식): PyTorch Lightning으로 학습한다면 콜백 하나 추가로 끝. 나머지는 그대로.
 
 ## Pruning
 
@@ -65,7 +65,7 @@ torch.save({"model": model.state_dict(), "masks": masks.state_dict()}, "pruned.p
 masks = ck.MaskSet(model).load_state_dict(torch.load("pruned.pt")["masks"])   # 나중에 복원
 ```
 
-- `scope="global"`은 모든 레이어를 하나의 threshold로 순위 매기고, `"layer"`는 레이어마다 같은 sparsity로 자릅니다.
+- `scope="global"`은 모든 레이어를 하나의 threshold로 순위를 매기고, `"layer"`는 레이어마다 같은 sparsity로 자릅니다.
 - `exclude` / `include`에는 `"first"`, `"last"`, 모듈 이름, 접두사(`"backbone.layer1"`)를 쓸 수 있습니다.
 - 반복 pruning: `MaskSet`을 다시 넘기면 됩니다(`ck.prune_magnitude(model, 0.9, masks=masks)`). 이미 잘린 가중치는 되살아나지 않습니다.
 - 학습 중 점진적 pruning:
@@ -86,7 +86,7 @@ ck.finetune(model, train_loader, epochs=3, masks=masks)  # 0을 고정한 채 �
 removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}: 이제 모델이 실제로 작아짐
 ```
 
-`remove_pruned_channels`는 forward 한 번을 추적해서 안전한 곳만 지웁니다. 만든 쪽의 출력이 채널을 보존하는 모듈(BatchNorm, activation, pooling, dropout, Flatten)만 거쳐 정확히 하나의 Conv(`groups=1`) 또는 Linear로 들어갈 때만 삭제합니다. 출력이 공유되거나(residual 덧셈, concat) grouped conv가 소비하는 경우는 0인 채로 그대로 둡니다. classifier의 출력은 절대 지우지 않습니다. 파라미터 shape이 바뀌므로 학습이 끝난 뒤에 쓰세요(이전 optimizer와 `MaskSet`은 무효가 됩니다). 0이 된 채널도 bias / BatchNorm shift가 activation을 거친 상수를 다음 레이어로 계속 흘려보내는데, 이 상수를 `example`에서 측정해 소비 레이어의 bias에 접어 넣으므로 Linear 소비자와 padding 없는 conv에서는 출력이 그대로이고, zero padding이 있는 conv에서는 테두리 위치만 달라집니다(`compensate_bias=False`로 끌 수 있습니다).
+`remove_pruned_channels`는 forward 한 번을 추적해서 안전한 곳만 지웁니다. 채널을 만든 레이어의 출력이 채널을 보존하는 모듈(BatchNorm, activation, pooling, dropout, Flatten)만 거쳐 정확히 하나의 Conv(`groups=1`) 또는 Linear로 들어갈 때만 삭제합니다. 출력이 공유되거나(residual 덧셈, concat) grouped conv가 소비하는 경우는 0인 채로 그대로 둡니다. classifier의 출력은 절대 지우지 않습니다. 파라미터 shape이 바뀌므로 학습이 끝난 뒤에 써야 합니다(이전 optimizer와 `MaskSet`은 무효가 됩니다). 0이 된 채널도 bias / BatchNorm shift가 activation을 거친 상수를 다음 레이어로 계속 흘려보냅니다. 이 상수를 `example`에서 측정해 소비 레이어의 bias에 접어 넣으므로, Linear 소비자와 padding 없는 conv에서는 출력이 그대로이고 zero padding이 있는 conv에서는 테두리 위치만 달라집니다(`compensate_bias=False`로 끌 수 있습니다).
 
 ## Quantization
 
@@ -97,7 +97,7 @@ removed = ck.remove_pruned_channels(model, example)    # {"features.0": 16, ...}
 | `quantize_weight_only(model, bits=8 \| 4 \| 2, group_size=None)` | 정수 가중치를 packed `uint8` 버퍼에 저장하고 `forward`에서 dequantize | 실제 저장 용량 감소, 모든 장치 |
 | `quantize_dynamic_int8(model)` | PyTorch dynamic int8 quantization (Linear / LSTM / GRU) | 실제 int8 커널, CPU |
 
-*simulated*는 가중치와 activation을 정수 격자로 반올림하되 float으로 저장·연산한다는 뜻입니다. int8(또는 int4) 배포에서 볼 정확도를 어떤 장치에서든 그대로 얻을 수 있습니다. `export_onnx`는 8-bit fake quantizer를 QuantizeLinear/DequantizeLinear 노드로 내보내고(TorchScript exporter), ONNX Runtime이 fake-quantized 모델을 1e-2 안팎으로 재현합니다. 실제 정수 커널은 배포하는 런타임(ONNX Runtime, TensorRT 등)의 몫입니다.
+*simulated*는 가중치와 activation을 정수 격자로 반올림하되 float으로 저장·연산한다는 뜻입니다. int8(또는 int4) 배포에서 볼 정확도를 어떤 장치에서든 그대로 얻을 수 있습니다. `export_onnx`는 8-bit fake quantizer를 QuantizeLinear/DequantizeLinear 노드로 내보내고(TorchScript exporter), ONNX Runtime이 fake-quantized 모델을 1e-2 안팎의 오차로 재현합니다. 실제 정수 커널은 배포하는 런타임(ONNX Runtime, TensorRT 등)의 몫입니다.
 
 ```python
 # PTQ: 학습 데이터 배치 몇 개면 충분
@@ -119,7 +119,7 @@ ck.finalize_qat(q)                       # quantizer 고정, eval 모드
 q = ck.quantize_weight_only(model, bits=4, group_size=128)
 ```
 
-더 낮은 수준의 부품도 그대로 쓸 수 있습니다: `fold_bn`, `attach_quantizers`, `init_weight_quantizers`, `calibrate`, `set_mode`, `quantizers`, `export_mode`, 그리고 `Quantizer`, `LSQQuantizer`, `Observer` 클래스. 양자화된 레이어는 원래 파라미터와 state_dict 키를 그대로 유지하고(`fc.weight`는 그대로 `fc.weight`) `fc.wq.*` / `fc.aq.*` 버퍼가 추가됩니다. 저장한 양자화 모델을 다시 불러오려면 float 모델을 만들고 같은 설정으로 `fold_bn`, `attach_quantizers`를 호출한 뒤 `load_state_dict` 하면 됩니다.
+저수준 부품도 그대로 쓸 수 있습니다: `fold_bn`, `attach_quantizers`, `init_weight_quantizers`, `calibrate`, `set_mode`, `quantizers`, `export_mode`, 그리고 `Quantizer`, `LSQQuantizer`, `Observer` 클래스. 양자화된 레이어는 원래 파라미터와 state_dict 키를 그대로 유지하고(`fc.weight`는 그대로 `fc.weight`) `fc.wq.*` / `fc.aq.*` 버퍼가 추가됩니다. 저장한 양자화 모델을 다시 불러오려면 float 모델을 만들고 같은 설정으로 `fold_bn`, `attach_quantizers`를 호출한 뒤 `load_state_dict` 하면 됩니다.
 
 ## 학습: fine-tune, 점진적 pruning, QAT
 
@@ -141,9 +141,9 @@ ck.evaluate(q, val_loader)       # {'loss': ..., 'accuracy': ...}
 
 배치는 `(inputs, targets)`이고 loss는 cross-entropy가 기본이며, `loss_fn(model, batch)`을 넘기면 바뀝니다. `finetune`은 파이프라인 단계로도 쓸 수 있고 `compress`가 mask를 알아서 넘겨줍니다: `compress(model, [("magnitude", {"sparsity": 0.8}), ("finetune", {"train_loader": loader, "epochs": 2}), ("ptq", {"calib_batches": calib})])`.
 
-## PyTorch Lightning
+## PyTorch Lightning에서 차용한 콜백 방식
 
-`LightningModule`은 아무것도 바꾸지 않습니다. 압축은 콜백입니다.
+`LightningModule`은 그대로 둡니다. 압축은 콜백입니다.
 
 ```python
 import lightning as L
@@ -158,7 +158,7 @@ trainer.fit(lit_module, datamodule)
 
 - `Pruning(prune, amount, at_epoch=0)`: `"magnitude"`, `"random"`, `"filters"`, `"nm"` 또는 `model -> MaskSet` callable로 한 번 pruning하고 mask를 고정. `Pruning(masks=...)`는 이미 있는 mask를 붙임.
 - `GradualPruning(final_sparsity, ...)`: `trainer.estimated_stepping_batches` 위에서 cubic schedule.
-- `QAT(w_bits, a_bits, method)`: `setup`에서 quantizer 삽입, train dataloader에 닿으면 그걸로 calibration(아니면 첫 배치), 학습되는 step size는 optimizer에 자동 추가, fit이 끝나면 `finalize_qat`.
+- `QAT(w_bits, a_bits, method)`: `setup`에서 quantizer 삽입, train dataloader에 접근할 수 있으면 그것으로 calibration(아니면 첫 배치), 학습되는 step size는 optimizer에 자동 추가, fit이 끝나면 `finalize_qat`.
 
 `module_attr`는 LightningModule 안의 네트워크 이름입니다(`self.model` -> `"model"`). `None`이면 모듈 전체를 압축합니다. sparsity는 epoch마다 log되고 mask는 `callback.masks`로 꺼낼 수 있습니다. `lightning`과 예전 `pytorch_lightning` 패키지 모두에서 동작합니다.
 
@@ -209,7 +209,7 @@ examples/         quickstart.py, train_with_pruning.py, qat_lsq.py, lightning_ca
 
 - 다루는 레이어: `nn.Linear`, `nn.Conv1d/2d/3d`, pruning에서는 `nn.MultiheadAttention`(`in_proj_weight`)까지. 그 외 모듈은 건드리지 않습니다.
 - `quantize_ptq`는 먼저 BatchNorm을 앞 레이어에 fold합니다(배포되는 int8 모델은 fold된 가중치로 돕니다). `prepare_qat`는 BatchNorm을 유지해서 학습 중 계속 적응하게 둡니다.
-- Quantization 함수는 기본적으로 deep copy를 반환하고(`inplace=False`), pruning 함수는 mask가 모델 파라미터를 참조해야 하므로 in place로 동작합니다.
+- quantization 함수는 기본적으로 deep copy를 반환하고(`inplace=False`), pruning 함수는 mask가 모델 파라미터를 참조해야 하므로 in place로 동작합니다.
 - `quantize_dynamic_int8`은 `torch.ao.quantization`을 감쌉니다. PyTorch가 `torchao` 쪽으로 가면서 deprecated 표시를 했지만 아직 포함되어 있고, x86 CPU에서 실제 int8 속도 향상을 얻는 가장 빠른 길입니다.
 
 ## 테스트
