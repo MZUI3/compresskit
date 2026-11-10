@@ -141,7 +141,7 @@ ck.evaluate(q, val_loader)       # {'loss': ..., 'accuracy': ...}
 
 Batches are `(inputs, targets)` with a cross-entropy loss unless you pass `loss_fn(model, batch)`. `finetune` is also a pipeline step, and `compress` hands it the masks: `compress(model, [("magnitude", {"sparsity": 0.8}), ("finetune", {"train_loader": loader, "epochs": 2}), ("ptq", {"calib_batches": calib})])`.
 
-## PyTorch Lightning
+## With PyTorch Lightning
 
 Nothing changes in your `LightningModule`; compression is a callback:
 

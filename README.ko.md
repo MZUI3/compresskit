@@ -33,7 +33,7 @@ Python 3.10+, PyTorch 2.0+. 모든 함수는 모델이 올라가 있는 장치(C
 
 1. **함수**: 내 모델과 내 학습 루프에 `ck.prune_magnitude`, `ck.quantize_ptq` 등을 그대로 호출.
 2. **`ck.finetune` / `ck.compress`**: 학습 루프와 기법 체인까지 맡기고 싶을 때.
-3. **콜백**(`compresskit.lightning`, PyTorch Lightning에서 차용한 방식): PyTorch Lightning으로 학습한다면 콜백 하나 추가로 끝. 나머지는 그대로.
+3. **Lightning 콜백**(`compresskit.lightning`): PyTorch Lightning으로 학습한다면 콜백 하나 추가로 끝. 나머지는 그대로.
 
 ## Pruning
 
@@ -141,7 +141,7 @@ ck.evaluate(q, val_loader)       # {'loss': ..., 'accuracy': ...}
 
 배치는 `(inputs, targets)`이고 loss는 cross-entropy가 기본이며, `loss_fn(model, batch)`을 넘기면 바뀝니다. `finetune`은 파이프라인 단계로도 쓸 수 있고 `compress`가 mask를 알아서 넘겨줍니다: `compress(model, [("magnitude", {"sparsity": 0.8}), ("finetune", {"train_loader": loader, "epochs": 2}), ("ptq", {"calib_batches": calib})])`.
 
-## PyTorch Lightning에서 차용한 콜백 방식
+## PyTorch Lightning과 함께 쓰기
 
 `LightningModule`은 그대로 둡니다. 압축은 콜백입니다.
 
